@@ -1,11 +1,24 @@
+import os
+import psycopg2
+from dotenv import load_dotenv
 from flask import Flask, request, redirect, session, render_template_string
 from werkzeug.security import generate_password_hash, check_password_hash
+
+load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = "change-me-later"
 
-users = {}  # temporary storage: {username: hashed_password}
-votes = {}  # temporary storage: {username: "cats" or "dogs"}
+
+def get_db():
+    return psycopg2.connect(
+        host=os.getenv("DB_HOST", "localhost"),
+        port=os.getenv("DB_PORT", "5432"),
+        user=os.getenv("POSTGRES_USER"),
+        password=os.getenv("POSTGRES_PASSWORD"),
+        dbname=os.getenv("POSTGRES_DB"),
+    )
+
 
 PAGE = """
 <h2>{{ title }}</h2>
@@ -18,15 +31,22 @@ PAGE = """
 <p><a href="/register">Register</a> | <a href="/login">Login</a></p>
 """
 
+
 @app.route("/")
 def home():
-    if "user" not in session:
+    if "user_id" not in session:
         return "Hello, voting app! <a href='/register'>Register</a> | <a href='/login'>Login</a>"
-    user = session["user"]
-    if user in votes:
-        return f"Hello, {user}! You voted for {votes[user]}. <a href='/results'>See results</a> | <a href='/logout'>Log out</a>"
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT choice FROM votes WHERE user_id = %s", (session["user_id"],))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    name = session["user"]
+    if row:
+        return f"Hello, {name}! You voted for {row[0]}. <a href='/results'>See results</a> | <a href='/logout'>Log out</a>"
     return f"""
-    <h2>Hello, {user}! Cast your vote</h2>
+    <h2>Hello, {name}! Cast your vote</h2>
     <form method="post" action="/vote">
       <button name="option" value="cats">Cats</button>
       <button name="option" value="dogs">Dogs</button>
@@ -34,18 +54,31 @@ def home():
     <p><a href="/results">See results</a> | <a href="/logout">Log out</a></p>
     """
 
+
 @app.route("/register", methods=["GET", "POST"])
 def register():
     message = ""
     if request.method == "POST":
         username = request.form["username"]
         password = request.form["password"]
-        if username in users:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM users WHERE username = %s", (username,))
+        if cur.fetchone():
             message = "That username is taken."
         else:
-            users[username] = generate_password_hash(password)
+            cur.execute(
+                "INSERT INTO users (username, password_hash) VALUES (%s, %s)",
+                (username, generate_password_hash(password)),
+            )
+            conn.commit()
+            cur.close()
+            conn.close()
             return redirect("/login")
+        cur.close()
+        conn.close()
     return render_template_string(PAGE, title="Register", message=message)
+
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -53,35 +86,62 @@ def login():
     if request.method == "POST":
         username = request.form["username"]
         password = request.form["password"]
-        if username in users and check_password_hash(users[username], password):
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT id, password_hash FROM users WHERE username = %s", (username,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row and check_password_hash(row[1], password):
+            session["user_id"] = row[0]
             session["user"] = username
             return redirect("/")
         message = "Wrong username or password."
     return render_template_string(PAGE, title="Login", message=message)
+
 
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect("/")
 
+
 @app.route("/vote", methods=["POST"])
 def vote():
-    if "user" not in session:
+    if "user_id" not in session:
         return redirect("/login")
-    user = session["user"]
     option = request.form.get("option")
     if option not in ("cats", "dogs"):
         return "Invalid option", 400
-    if user in votes:
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "INSERT INTO votes (user_id, choice) VALUES (%s, %s)",
+            (session["user_id"], option),
+        )
+        conn.commit()
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
         return "You already voted.", 409
-    votes[user] = option
+    finally:
+        cur.close()
+        conn.close()
     return redirect("/")
+
 
 @app.route("/results")
 def results():
-    cats = sum(1 for v in votes.values() if v == "cats")
-    dogs = sum(1 for v in votes.values() if v == "dogs")
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT choice, COUNT(*) FROM votes GROUP BY choice")
+    counts = dict(cur.fetchall())
+    cur.close()
+    conn.close()
+    cats = counts.get("cats", 0)
+    dogs = counts.get("dogs", 0)
     return f"<h2>Results</h2><p>Cats: {cats}</p><p>Dogs: {dogs}</p><a href='/'>Back</a>"
+
 
 if __name__ == "__main__":
     app.run(debug=True)
