@@ -1,4 +1,6 @@
 import os
+import json
+import redis
 import psycopg2
 from dotenv import load_dotenv
 from flask import Flask, request, redirect, session, render_template_string
@@ -8,6 +10,12 @@ load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = "change-me-later"
+
+cache = redis.Redis(
+    host=os.getenv("REDIS_HOST", "localhost"),
+    port=int(os.getenv("REDIS_PORT", "6379")),
+    decode_responses=True,
+)
 
 
 def get_db():
@@ -132,15 +140,25 @@ def vote():
 
 @app.route("/results")
 def results():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT choice, COUNT(*) FROM votes GROUP BY choice")
-    counts = dict(cur.fetchall())
-    cur.close()
-    conn.close()
+    cached = cache.get("results")
+    if cached:
+        counts = json.loads(cached)
+        source = "cache"
+    else:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT choice, COUNT(*) FROM votes GROUP BY choice")
+        counts = dict(cur.fetchall())
+        cur.close()
+        conn.close()
+        cache.setex("results", 10, json.dumps(counts))
+        source = "database"
     cats = counts.get("cats", 0)
     dogs = counts.get("dogs", 0)
-    return f"<h2>Results</h2><p>Cats: {cats}</p><p>Dogs: {dogs}</p><a href='/'>Back</a>"
+    return (
+        f"<h2>Results</h2><p>Cats: {cats}</p><p>Dogs: {dogs}</p>"
+        f"<p><small>Served from: {source}</small></p><a href='/'>Back</a>"
+    )
 
 
 if __name__ == "__main__":
