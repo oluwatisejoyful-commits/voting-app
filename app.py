@@ -151,7 +151,7 @@ def results():
         counts = dict(cur.fetchall())
         cur.close()
         conn.close()
-        cache.setex("results", 10, json.dumps(counts))
+        cache.set("results", json.dumps(counts), ex=10)
         source = "database"
     cats = counts.get("cats", 0)
     dogs = counts.get("dogs", 0)
